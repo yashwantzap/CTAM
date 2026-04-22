@@ -142,7 +142,7 @@ export interface AnalyzeCustomVulnerabilityResponse {
       hasExploit: boolean;
       daysSinceDisclosure: number;
       ransomwareUse: boolean;
-      cweAssigned: boolean;
+      cvssScore: number;
     };
   };
   mitigation: {
