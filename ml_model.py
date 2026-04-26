@@ -126,16 +126,16 @@ class MLEnsembleModel:
         if "denial of service" in description or " dos " in description:
             risk_score += 1
 
-        # Classify
-        if risk_score >= 6:
-            return 2  # High
-        elif risk_score >= 3:
-            return 1  # Medium
+        # Classify with balanced thresholds for better class distribution
+        if risk_score >= 10:
+            return 2  # High - critical vulnerabilities
+        elif risk_score >= 4:
+            return 1  # Medium - moderate risk
         else:
-            return 0  # Low
+            return 0  # Low - minimal risk factors
 
     def _extract_base_features(self, vuln: Dict[str, Any]) -> np.ndarray:
-        """Extract 6 base features from vulnerability"""
+        """Extract 9 base features from vulnerability"""
         features = []
 
         # 1. hasExploit (binary)
@@ -184,6 +184,27 @@ class MLEnsembleModel:
             else:
                 urgency = 0.0
             features.append(urgency)
+        except:
+            features.append(0.0)
+
+        # 7. numberOfCWEs (count normalized, max 5)
+        cwes = vuln.get("cwes", [])
+        num_cwes_normalized = min(len(cwes), 5) / 5.0
+        features.append(num_cwes_normalized)
+
+        # 8. criticalCwePresence (binary)
+        critical_cwes = ["CWE-78", "CWE-89", "CWE-94", "CWE-287", "CWE-22"]
+        has_critical_cwe = 1.0 if any(cwe in str(cwes) for cwe in critical_cwes) else 0.0
+        features.append(has_critical_cwe)
+
+        # 9. recentActivityScore (sigmoid of days since disclosure)
+        try:
+            from datetime import datetime
+            date_added = datetime.fromisoformat(vuln.get("dateAdded", "").replace("Z", "+00:00"))
+            days_since = (datetime.now(date_added.tzinfo) - date_added).days
+            # Sigmoid function: recent=high, old=low
+            recent_score = 1.0 / (1.0 + np.exp(days_since / 30.0 - 2))
+            features.append(recent_score)
         except:
             features.append(0.0)
 
@@ -296,7 +317,15 @@ class MLEnsembleModel:
         X_train_scaled = self.scaler.fit_transform(X_train)
         X_test_scaled = self.scaler.transform(X_test)
 
-        # Train XGBoost
+        # Calculate class weights to handle imbalance
+        from sklearn.utils.class_weight import compute_class_weight
+        class_weights = compute_class_weight('balanced',
+                                             classes=np.unique(y_train),
+                                             y=y_train)
+        class_weight_dict = {i: class_weights[i] for i in range(len(class_weights))}
+        print(f"[ML] Class weights: {class_weight_dict}")
+
+        # Train XGBoost with class weights
         print("[ML] Training XGBoost model...")
         self.xgb_model = xgb.XGBClassifier(
             n_estimators=100,
@@ -306,11 +335,12 @@ class MLEnsembleModel:
             colsample_bytree=0.8,
             random_state=42,
             eval_metric='mlogloss',
+            scale_pos_weight=2.0,  # Penalize minority class misclassifications
             verbosity=0
         )
         self.xgb_model.fit(X_train_scaled, y_train)
 
-        # Train Random Forest
+        # Train Random Forest with balanced class weights
         print("[ML] Training Random Forest model...")
         self.rf_model = RandomForestClassifier(
             n_estimators=100,
@@ -318,7 +348,8 @@ class MLEnsembleModel:
             min_samples_split=5,
             min_samples_leaf=2,
             random_state=42,
-            n_jobs=-1
+            n_jobs=-1,
+            class_weight='balanced'  # Handle class imbalance
         )
         self.rf_model.fit(X_train, y_train)
 
@@ -336,17 +367,34 @@ class MLEnsembleModel:
         # Calculate metrics
         print("[ML] Computing metrics...")
         accuracy = accuracy_score(y_test, y_pred)
-        precision = precision_score(y_test, y_pred, average='weighted', zero_division=0)
-        recall = recall_score(y_test, y_pred, average='weighted', zero_division=0)
+        # Use macro average instead of weighted to get unbiased per-class metrics
+        precision = precision_score(y_test, y_pred, average='macro', zero_division=0)
+        recall = recall_score(y_test, y_pred, average='macro', zero_division=0)
         f1 = f1_score(y_test, y_pred, average='weighted', zero_division=0)
 
+        # Class distribution in test set
+        unique_labels, counts = np.unique(y_test, return_counts=True)
+        print("[ML] Test set class distribution:")
+        for class_idx, count in zip(unique_labels, counts):
+            class_name = ["Low", "Medium", "High"][class_idx]
+            print(f"  {class_name}: {count} samples ({count/len(y_test)*100:.1f}%)")
+
+        # Prediction distribution
+        unique_pred, counts_pred = np.unique(y_pred, return_counts=True)
+        print("[ML] Prediction distribution:")
+        for class_idx, count in zip(unique_pred, counts_pred):
+            class_name = ["Low", "Medium", "High"][class_idx]
+            print(f"  {class_name}: {count} samples ({count/len(y_pred)*100:.1f}%)")
+
         # Per-class metrics
+        from sklearn.metrics import precision_recall_fscore_support
+        p_per_class, r_per_class, f_per_class, support = precision_recall_fscore_support(y_test, y_pred, zero_division=0)
         print("[ML] Per-class metrics:")
         for class_idx, class_name in enumerate(["Low", "Medium", "High"]):
             class_mask = y_test == class_idx
             if class_mask.sum() > 0:
                 class_acc = (y_pred[class_mask] == y_test[class_mask]).mean()
-                print(f"  {class_name}: {sum(class_mask)} samples, accuracy={class_acc:.3f}")
+                print(f"  {class_name}: P={p_per_class[class_idx]:.3f}, R={r_per_class[class_idx]:.3f}, F1={f_per_class[class_idx]:.3f}, Support={support[class_idx]}")
 
         # Confusion matrix
         cm = confusion_matrix(y_test, y_pred)
@@ -360,7 +408,8 @@ class MLEnsembleModel:
 
         feature_names = [
             "hasExploit", "daysSinceDisclosure", "ransomwareUse",
-            "hasCwe", "vendorPopularity", "actionUrgency"
+            "hasCwe", "vendorPopularity", "actionUrgency",
+            "numberOfCWEs", "criticalCwePresence", "recentActivityScore"
         ] + [f"tfidf_{i}" for i in range(50)]
 
         self.feature_importance = {

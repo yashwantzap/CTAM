@@ -6,7 +6,12 @@
       "Bash(pip install *)",
       "Bash(npm run *)",
       "Bash(netstat -tno)",
-      "Bash(curl -s http://localhost:5000)"
+      "Bash(curl -s http://localhost:5000)",
+      "Bash(cd /tmp)",
+      "Bash(node \"C:\\\\Users\\\\yashw\\\\Downloads\\\\create_ctam_presentation.js\")",
+      "Bash(cp \"C:\\\\Users\\\\yashw\\\\Downloads\\\\create_ctam_presentation.js\" /tmp/)",
+      "Bash(node create_ctam_presentation.js)",
+      "Bash(python ml_model.py)"
     ]
   }
 }
